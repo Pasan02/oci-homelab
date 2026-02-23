@@ -34,10 +34,16 @@ Faced with hardware constraints, I made the strategic decision to pivot to a vir
 OCI's free tier provides perpetual compute instances and storage that allow me to meet the project's reliability and cost requirements without compromise.
 
 ## Current Status and Technical Architecture
-I am currently in the process of creating the Virtual Machine (VM) on Oracle Cloud. This process has introduced a new, critical technical step: OCI does not natively support Debian 12, the chosen lightweight OS. Therefore, I am currently uploading a custom Debian 12 image to OCI Object Storage. This preparatory work ensures the new architecture runs on the desired minimalist OS for resource efficiency, guaranteeing 24/7 reliability and availability while adhering strictly to the Always Free Tier resources.
+I have successfully established the foundational networking infrastructure within Oracle Cloud. Key components, including the **Virtual Cloud Network (VCN)**, **Internet Gateway**, **Route Tables**, and a **Public Subnet**, are now operational. Security lists have been configured to allow HTTPS and HTTP traffic, while restricting management access.
+
+Crucially, I have deployed and tested a **Bastion Host**. This ensures secure, tunnelled SSH access to my private resources without exposing them directly to the public internet.
+
+Simultaneously, I am preparing the compute environment. Since OCI does not natively support Debian 12, I am uploading a custom Debian 12 image.
 
 | Component | Technology / Status | Purpose |
 | :--- | :--- | :--- |
+| **Network** | **VCN, Subnets, Gateway** | configured for secure public and private traffic. |
+| **Security** | **Security Lists & Bastion** | Ingress rules set for web traffic; SSH restricted via Bastion. |
 | **Operating System** | Debian 12 (Custom Image) | Minimalist, stable OS for resource efficiency. |
 | **Application Stack** | Immich &amp; Paperless-ngx | Core photo and file management services. |
 | **Deployment** | Docker Compose | Used for consistent, reproducible, and efficient application deployment. |
@@ -49,3 +55,35 @@ I am currently in the process of creating the Virtual Machine (VM) on Oracle Clo
 Before proceeding with the deployment of services, I must finalize the strategy for the two most critical components:
 1.  **Public Access Method:** How will the Immich and Paperless-ngx web interfaces be securely exposed to the public internet? (e.g., VPN, Cloudflare Tunnel, or a reverse proxy).
 2.  **Backup Plan:** A robust, automated backup solution is required that aligns with the OCI Always Free Tier to avoid costs.
+
+## Troubleshooting Log: The Silent Bastion Incident
+
+### The Issue
+During the configuration of the OCI Bastion service, a perplexing connectivity issue arose. Despite the Bastion tunnel establishing successfully (authentication passed), any attempt to SSH into the target VM through the tunnel resulted in the error: `Connection closed by ::1 port 9000`.
+
+This behavior was confusing because:
+1.  **Direct SSH worked:** I could SSH directly to the VM using its public IP (temporarily allowed).
+2.  **Bastion Auth worked:** The verbose SSH logs (`ssh -vvv`) showed the tunnel handshake completing.
+3.  **VM Logs were silent:** `sudo journalctl -u ssh` on the VM showed *zero* connection attempts from the Bastion's private IP.
+
+### The Investigation
+We systematically ruled out potential causes:
+-   **Client-Side:** Forced IPv4 usage (`127.0.0.1` vs `localhost`) to rule out Windows IPv6 tunneling quirks.
+-   **VM Firewall:** Verified localized firewalls (`iptables`, `nftables`) were inactive or allowing traffic.
+-   **OCI Ingress:** Confirmed the Security List allowed TCP traffic on port 22 from the Bastion's private endpoint IP.
+-   **Network Traffic:** Running `tcpdump -i any host [Bastion_IP]` on the VM revealed that **no packets** were arriving from the Bastion.
+
+### The Root Cause: Missing Egress Rules
+The culprit was identified in the **OCI Security List Egress Rules**. 
+
+The Bastion service injects a hidden VNIC into the target subnet to forward traffic. While I had correctly configured **Ingress Rules** to allow traffic *into* the subnet, I had inadvertently deleted the default **Egress Rule** (0.0.0.0/0). 
+
+Because OCI Security Lists are stateful but require explicit permission to initiate outbound traffic, the Bastion could receive my connection request but was blocked by the subnet rules from sending that traffic *out* to the VM (even though they are in the same subnet).
+
+### The Fix & Lesson
+**The Fix:** Added a stateful Egress Rule to the subnet Security List allowing `0.0.0.0/0` (All Protocols).
+
+**The Lesson:** 
+1.  **Bastions live in the subnet:** They are subject to the same Security List rules as the VMs they manage.
+2.  **Ingress != Connectivity:** Allowing traffic *in* isn't enough; the service must be allowed to send traffic *out* to its target.
+3.  **Tcpdump doesn't lie:** When logs are silent, packet captures are the definitive source of truth for network path issues.
