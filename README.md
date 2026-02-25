@@ -33,28 +33,64 @@ Faced with hardware constraints, I made the strategic decision to pivot to a vir
 
 OCI's free tier provides perpetual compute instances and storage that allow me to meet the project's reliability and cost requirements without compromise.
 
+## Phase 3: The Reality Check - Resource Constraints & Architecture Shift
+My initial attempt at deploying the stack on OCI's **AMD Micro instance** (1 OCPU, 1 GB RAM) proved to be a significant bottleneck.
+
+### The Failure Point
+Upon deploying the full stack (Nginx + Immich + Database + Redis), the system immediately became unresponsive. The terminal lagged, and Nginx returned `502 Bad Gateway` errors.
+*   **Root Cause:** Immich is a resource-intensive application, requiring a Machine Learning engine, Redis, and Postgres. The 1 GB RAM ceiling of the Micro instance was instantly hit, causing aggressive swapping and thrashing.
+
+### The Solution: ARM Ampere Architecture
+To resolve this, I migrated the entire infrastructure to OCI's **Always Free ARM Ampere** tier (`VM.Standard.A1.Flex`).
+*   **Specs:** 4 OCPUs (ARM64), 24 GB RAM.
+*   **Impact:** This massive increase in memory (24x) eliminated all performance bottlenecks, allowing Immich and Paperless-ngx to run smoothly side-by-side.
+
+## Phase 4: The OS Dilemma - Debian vs. Ubuntu on ARM
+While my preference (and the original plan) was to use **Debian** for its stability and minimal footprint, a platform-specific hurdle emerged during the ARM migration.
+
+### The Hurdle
+Oracle Cloud's web console has strict filtering rules for image compatibility. When selecting the ARM Ampere shape, the standard "Debian" platform image was often hidden or marked as incompatible in the easy-select dropdowns, as Oracle's default Debian images are primarily built for x86 (AMD/Intel) architectures.
+
+### The Decision
+Rather than fighting the platform by building and uploading a custom Debian ARM image (which introduces maintenance overhead), I opted to switch to **Ubuntu 24.04 LTS**.
+*   **Reasoning:** Ubuntu has first-class, official support for ARM on OCI. It is readily available in the "Platform Images" list, ensuring seamless updates and compatibility with the `VM.Standard.A1.Flex` shape.
+*   **Trade-off:** Minimal. Ubuntu is based on Debian, uses `apt`, and runs Docker identically, satisfying all project requirements with zero friction.
+
+## Phase 5: Implementation Hurdles & Solutions
+
+### 1. The Firewall (iptables) Trap
+Default OCI images come with strict `iptables` rules. When attempting to open ports 80 (HTTP) and 443 (HTTPS), standard tutorials failed.
+*   **Error:** `iptables: Index of insertion too big.`
+*   **Cause:** The default firewall chain was empty or shorter than expected, so trying to insert a rule at index `#6` (a common copy-paste command) failed.
+*   **Fix:** We simplified the command to insert rules at the *top* of the chain (`iptables -I INPUT 1 ...`) or simply append them, ensuring traffic was allowed.
+
+### 2. The "Billable Size" Scare
+During the creation of a custom backup image, OCI reported a "Billable Size: 2GB," raising concerns about accidental costs.
+*   **Clarification:** OCI's Always Free Tier includes **10 GB** of Object Storage. The "Billable Size" simply refers to the space that *counts* against your quota, not necessarily a charged amount. Since 2GB < 10GB, the backup remained free.
+
+### 3. Docker Image Manifests
+The initial `docker-compose.yml` for Immich likely used specific SHA256 digests for Redis and Postgres that were either outdated or x86-specific.
+*   **Fix:** We switched to standard version tags (e.g., `redis:6.2-alpine`, `postgres:14-alpine`) in the Docker Compose file. Docker's multi-arch support then automatically pulled the correct `arm64` images for the new Ampere instance.
+
 ## Current Status and Technical Architecture
-I have successfully established the foundational networking infrastructure within Oracle Cloud. Key components, including the **Virtual Cloud Network (VCN)**, **Internet Gateway**, **Route Tables**, and a **Public Subnet**, are now operational. Security lists have been configured to allow HTTPS and HTTP traffic, while restricting management access.
-
-Crucially, I have deployed and tested a **Bastion Host**. This ensures secure, tunnelled SSH access to my private resources without exposing them directly to the public internet.
-
-Simultaneously, I am preparing the compute environment. Since OCI does not natively support Debian 12, I am uploading a custom Debian 12 image.
+I have successfully migrated to the high-performance ARM tier and established the foundational application stack.
 
 | Component | Technology / Status | Purpose |
 | :--- | :--- | :--- |
-| **Network** | **VCN, Subnets, Gateway** | configured for secure public and private traffic. |
-| **Security** | **Security Lists & Bastion** | Ingress rules set for web traffic; SSH restricted via Bastion. |
-| **Operating System** | Debian 12 (Custom Image) | Minimalist, stable OS for resource efficiency. |
-| **Application Stack** | Immich &amp; Paperless-ngx | Core photo and file management services. |
-| **Deployment** | Docker Compose | Used for consistent, reproducible, and efficient application deployment. |
-| **SSH Access** | Bastion Host / Jump Server | Utilized for secure, controlled access to the VM, minimizing the attack surface. |
-| **Public Access** | *(Undecided)* | Method for securely exposing Immich/Paperless-ngx web interfaces to the internet. |
-| **Data Backup** | *(Undecided)* | Strategy for ensuring data redundancy and recoverability. |
+| **Network** | **VCN, Subnets, Gateway** | Configured for secure public and private traffic. |
+| **Security** | **Security Lists & Internal Firewall** | Ingress rules set for web traffic (80/443); SSH restricted. |
+| **Operating System** | **Ubuntu 24.04 (ARM64)** | High-performance OS fully supported on OCI Ampere. |
+| **Application Stack** | **Immich** | Core photo and video management service running in Docker. |
+| **Reverse Proxy** | **Nginx** | Handles traffic routing and load balancing. |
+| **Compute** | **OCI Ampere (4 OCPU, 24GB RAM)** | Provides substantial resources for AI/ML workloads. |
 
 ## Key Decisions Remaining
-Before proceeding with the deployment of services, I must finalize the strategy for the two most critical components:
-1.  **Public Access Method:** How will the Immich and Paperless-ngx web interfaces be securely exposed to the public internet? (e.g., VPN, Cloudflare Tunnel, or a reverse proxy).
+Before proceeding with the deployment of Paperless-ngx, I must finalize the strategy for the critical components:
+1.  **Public Access Method:** Currently relying on Nginx Reverse Proxy with standard HTTP. SSL certs (LetsEncrypt) and domain configuration are pending.
+2.  **Backup Plan:** A robust, automated backup solution is required that aligns with the OCI Always Free Tier.
+3.  **VPN vs. Bastion:** While the Bastion is secure, I am considering setting up a VPN (WireGuard) to allow direct access to the server via a fixed internal IP.).
 2.  **Backup Plan:** A robust, automated backup solution is required that aligns with the OCI Always Free Tier to avoid costs.
+3.  **VPN vs. Bastion:** While the Bastion is secure, it introduces friction for daily management. I am considering setting up a VPN (like WireGuard or OpenVPN) to allow direct access to the server via a fixed internal IP, simplifying the workflow.
 
 ## Troubleshooting Log: The Silent Bastion Incident
 
